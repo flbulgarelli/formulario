@@ -40,7 +40,7 @@ module Formulario
     end
 
     def validate(answer)
-      {}
+      answer.map { |k, v| [k, fields.find { |it| it.name.to_s == k.to_s }.validate(v)] }.to_h.compact
     end
   end
 
@@ -88,6 +88,10 @@ module Formulario
 
     def normalize(value)
       normalizations.inject(value) { |accum, it| it.normalize(accum) }
+    end
+
+    def validate(value)
+      validations.lazy.map { |it| it.validate(value) }.first
     end
 
     def self.load(spec)
@@ -140,19 +144,29 @@ module Formulario
     end
 
     module Downcase
-      def self.normalize(value)
+      def self.normalize(value, context: nil)
         value.downcase
       end
     end
 
     module Trim
+      def self.normalize(value, context: nil)
+        value.strip
+      end
     end
 
     module Squeeze
+      def self.normalize(value, context: nil)
+        value.squeeze("\s|\n")
+      end
     end
 
     class Exec
       include ExecLike
+
+      def normalize(value, context: nil)
+        %x{#{command.gsub('{}', value)}}
+      end
     end
   end
 
@@ -175,6 +189,10 @@ module Formulario
       def initialize(pattern)
         @pattern = pattern
       end
+
+      def validate(value, context: nil)
+        'Invalid format' unless value =~ pattern
+      end
     end
 
     class Exec
@@ -185,7 +203,8 @@ module Formulario
     end
 
     module NonBlank
-      def self.validate(value, _context)
+      def self.validate(value, context: nil)
+        'Can not be blank' if value.blank?
       end
     end
   end
@@ -197,6 +216,21 @@ describe Formulario do
     expect(Formulario::VERSION).not_to be nil
   end
 
+  describe 'normalizations' do
+    it { expect(Formulario::Normalization::Downcase.normalize 'Hello').to eq 'hello' }
+    it { expect(Formulario::Normalization::Trim.normalize ' Hello world   ').to eq 'Hello world' }
+    it { expect(Formulario::Normalization::Squeeze.normalize " Hello   world\n\n  This is a loooong  text  ").to eq " Hello world\n This is a loooong text " }
+    it { expect(Formulario::Normalization::Exec.new("echo '{}' | tr -d '[:space:]'").normalize  'hello world').to eq 'helloworld' }
+  end
+
+  describe 'validations' do
+    it { expect(Formulario::Validation::NonBlank.validate 'Hello').to be nil }
+    it { expect(Formulario::Validation::NonBlank.validate '').to eq 'Can not be blank' }
+
+    it { expect(Formulario::Validation::Regexp.new(/\d{4}-[a-z]/ ).validate '1234-a').to be nil }
+    it { expect(Formulario::Validation::Regexp.new(/\d{4}-[a-z]/ ).validate 'adsadasda').to eq 'Invalid format' }
+  end
+
   describe 'form evaluation' do
     subject do
       Formulario.load(
@@ -204,7 +238,10 @@ describe Formulario do
           {
             type: :text,
             name: 'username',
-            validate: {regexp: '\w{4}'},
+            validate: {
+              nonblank: true,
+              regexp: '\w{4}'
+            },
             normalize: {downcase: true}
           }
         ]
@@ -214,7 +251,9 @@ describe Formulario do
     pending { expect(subject.render).to eq '<form></form>' }
     it { expect(subject.normalize username: 'FooO').to eq username: 'fooo' }
 
+    it { expect(subject.validate username: '').to eq username: 'Can not be blank' }
     it { expect(subject.validate username: 'Fooo').to eq({}) }
+
     pending { expect(subject.validate username: 'Foooz').to eq username: 'does not match validation expression' }
   end
 
